@@ -1,4 +1,4 @@
-// Test file for xprefix_renamer
+// Test file for upsidedown
 #include <iostream>
 
 int myVariable = 42;

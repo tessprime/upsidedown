@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xprefix_renamer)
+project(upsidedown)
 
 set(REQUIRED_LLVM_MAJOR 16)
 
@@ -23,15 +23,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
-add_executable(xprefix_renamer main.cpp)
+add_executable(upsidedown main.cpp)
 
 # Add linker flags to avoid duplicate symbol errors
 if(UNIX AND NOT APPLE)
-  target_link_options(xprefix_renamer PRIVATE "-Wl,--allow-multiple-definition")
+  target_link_options(upsidedown PRIVATE "-Wl,--allow-multiple-definition")
 endif()
 
 llvm_map_components_to_libnames(LLVM_LIBS support)
-target_link_libraries(xprefix_renamer
+target_link_libraries(upsidedown
   PRIVATE
   clangTooling
   clangFrontend

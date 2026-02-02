@@ -1,4 +1,4 @@
-// xprefix_rename.cpp
+// main.cpp
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/RecursiveASTVisitor.h"
