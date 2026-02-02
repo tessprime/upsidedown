@@ -11,9 +11,13 @@
 #include "clang/Tooling/Core/Replacement.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Index/USRGeneration.h"
+#include "clang/Lex/Lexer.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <cstdio>
 #include <map>
+#include <set>
 #include <vector>
 
 using namespace clang;
@@ -50,6 +54,40 @@ static const std::map<char, std::string> upsideDownMap = {
   {'[', "]"}, {']', "["}, {'{', "}"}, {'}', "{"}, {'<', ">"},
   {'>', "<"}, {'&', "⅋"}
 };
+
+// Escape special characters for C++ string literals
+static std::string escapeString(const std::string &str) {
+  std::string result;
+  for (unsigned char c : str) {
+    switch (c) {
+      case '\n': result += "\\n"; break;
+      case '\t': result += "\\t"; break;
+      case '\r': result += "\\r"; break;
+      case '\0': result += "\\0"; break;
+      case '\\': result += "\\\\"; break;
+      case '"': result += "\\\""; break;
+      case '\a': result += "\\a"; break;
+      case '\b': result += "\\b"; break;
+      case '\f': result += "\\f"; break;
+      case '\v': result += "\\v"; break;
+      default:
+        // For printable ASCII and UTF-8 continuation bytes, keep as-is
+        if (c >= 32 && c < 127) {
+          result += c;
+        } else if (c >= 0x80) {
+          // UTF-8 multi-byte sequence, keep as-is
+          result += c;
+        } else {
+          // Other control characters, use octal escape
+          char buf[5];
+          snprintf(buf, sizeof(buf), "\\%03o", c);
+          result += buf;
+        }
+        break;
+    }
+  }
+  return result;
+}
 
 // Convert a string to upside-down using the map
 static std::string toUpsideDown(const std::string &str) {
@@ -219,14 +257,35 @@ public:
     // Only transform string literals in main file
     if (!SM.isWrittenInMainFile(Loc)) return true;
 
-    std::string Original = SL->getString().str();
-    std::string Transformed = toUpsideDown(Original);
+    // Get the interpreted string (with escape sequences already processed)
+    std::string Interpreted = SL->getString().str();
+
+    // Transform it
+    std::string Transformed = toUpsideDown(Interpreted);
+
+    // Escape it for writing back to source
+    std::string Escaped = escapeString(Transformed);
+
+    // Get the actual source text to determine the length
+    // We need to get from opening quote to closing quote
+    SourceRange Range = SL->getSourceRange();
+    SourceLocation EndLoc = Range.getEnd();
+    if (EndLoc.isInvalid()) return true;
+    EndLoc = SM.getExpansionLoc(EndLoc);
+
+    // Use Lexer to get the location after the closing quote
+    SourceLocation AfterQuote = Lexer::getLocForEndOfToken(EndLoc, 0, SM, LangOptions());
+
+    // Calculate length of content between quotes in source
+    // Loc points to opening quote, AfterQuote points after closing quote
+    // So we subtract 2 (one for each quote)
+    unsigned TotalLength = SM.getFileOffset(AfterQuote) - SM.getFileOffset(Loc);
+    unsigned ContentLength = TotalLength - 2; // Exclude both quotes
 
     // Replace the content between the quotes
-    // getBeginLoc() points to the opening quote, so offset by 1 to skip it
     SourceLocation StartLoc = Loc.getLocWithOffset(1);
 
-    auto Err = Repls.add(Replacement(SM, StartLoc, Original.length(), Transformed));
+    auto Err = Repls.add(Replacement(SM, StartLoc, ContentLength, Escaped));
     if (Err) {
       llvm::consumeError(std::move(Err));
     }
@@ -237,6 +296,149 @@ public:
 private:
   const SourceManager &SM;
   Replacements &Repls;
+};
+
+// Track external symbol usage per function
+class ExternalSymbolTracker : public RecursiveASTVisitor<ExternalSymbolTracker> {
+public:
+  ExternalSymbolTracker(const SourceManager &SM)
+      : SM(SM), CurrentFunction(nullptr) {}
+
+  bool VisitFunctionDecl(FunctionDecl *FD) {
+    if (!FD || !FD->hasBody()) return true;
+    if (!isUserLocation(SM, FD->getLocation())) return true;
+
+    CurrentFunction = FD;
+    return true;
+  }
+
+  bool VisitDeclRefExpr(DeclRefExpr *E) {
+    if (!E || !CurrentFunction) return true;
+
+    const ValueDecl *D = E->getDecl();
+    if (!D) return true;
+
+    // Skip operators and special functions
+    if (const auto *FD = dyn_cast<FunctionDecl>(D)) {
+      if (FD->isOverloadedOperator()) return true;
+    }
+
+    // Check if this is an external symbol (not defined in main file)
+    SourceLocation DeclLoc = D->getLocation();
+    if (DeclLoc.isInvalid()) return true;
+    DeclLoc = SM.getExpansionLoc(DeclLoc);
+
+    // If the declaration is not in the main file, it's external
+    if (!SM.isWrittenInMainFile(DeclLoc)) {
+      // Get the full qualified name
+      std::string FullName;
+      llvm::raw_string_ostream OS(FullName);
+      E->getDecl()->printQualifiedName(OS);
+      OS.flush();
+
+      FunctionExternals[CurrentFunction].insert(FullName);
+      ExternalDeclMap[FullName] = E->getDecl();
+    }
+
+    return true;
+  }
+
+  bool VisitMemberExpr(MemberExpr *E) {
+    if (!E || !CurrentFunction) return true;
+
+    const ValueDecl *D = E->getMemberDecl();
+    if (!D) return true;
+
+    SourceLocation DeclLoc = D->getLocation();
+    if (DeclLoc.isInvalid()) return true;
+    DeclLoc = SM.getExpansionLoc(DeclLoc);
+
+    if (!SM.isWrittenInMainFile(DeclLoc)) {
+      std::string FullName;
+      llvm::raw_string_ostream OS(FullName);
+      D->printQualifiedName(OS);
+      OS.flush();
+
+      FunctionExternals[CurrentFunction].insert(FullName);
+      ExternalDeclMap[FullName] = D;
+    }
+
+    return true;
+  }
+
+  // Map of function -> set of external symbols it uses
+  std::map<const FunctionDecl*, std::set<std::string>> FunctionExternals;
+  // Map of external symbol name -> its declaration
+  std::map<std::string, const NamedDecl*> ExternalDeclMap;
+
+private:
+  const SourceManager &SM;
+  FunctionDecl *CurrentFunction;
+};
+
+// Replace external symbol uses with aliases
+class ExternalSymbolReplacer : public RecursiveASTVisitor<ExternalSymbolReplacer> {
+public:
+  ExternalSymbolReplacer(const SourceManager &SM, Replacements &Repls,
+                         const std::map<const FunctionDecl*, std::map<std::string, std::string>> &AliasMap)
+      : SM(SM), Repls(Repls), AliasMap(AliasMap), CurrentFunction(nullptr) {}
+
+  bool VisitFunctionDecl(FunctionDecl *FD) {
+    if (!FD || !FD->hasBody()) return true;
+    CurrentFunction = FD;
+    return true;
+  }
+
+  bool VisitDeclRefExpr(DeclRefExpr *E) {
+    if (!E || !CurrentFunction) return true;
+
+    auto FuncIt = AliasMap.find(CurrentFunction);
+    if (FuncIt == AliasMap.end()) return true;
+
+    const ValueDecl *D = E->getDecl();
+    if (!D) return true;
+
+    std::string FullName;
+    llvm::raw_string_ostream OS(FullName);
+    D->printQualifiedName(OS);
+    OS.flush();
+
+    auto AliasIt = FuncIt->second.find(FullName);
+    if (AliasIt != FuncIt->second.end()) {
+      // Replace this use with the alias
+      SourceLocation Loc = E->getLocation();
+      if (Loc.isInvalid()) return true;
+      Loc = SM.getExpansionLoc(Loc);
+
+      if (!SM.isWrittenInMainFile(Loc)) return true;
+
+      // Calculate the actual source range length
+      SourceRange Range = E->getSourceRange();
+      if (Range.isInvalid()) return true;
+
+      // Get the actual text length from the source
+      auto StartLoc = Range.getBegin();
+      auto EndLoc = Range.getEnd();
+
+      // Find the end of the identifier token
+      EndLoc = clang::Lexer::getLocForEndOfToken(EndLoc, 0, SM, clang::LangOptions());
+
+      unsigned Length = SM.getFileOffset(EndLoc) - SM.getFileOffset(StartLoc);
+
+      auto Err = Repls.add(Replacement(SM, Range.getBegin(), Length, AliasIt->second));
+      if (Err) {
+        llvm::consumeError(std::move(Err));
+      }
+    }
+
+    return true;
+  }
+
+private:
+  const SourceManager &SM;
+  Replacements &Repls;
+  const std::map<const FunctionDecl*, std::map<std::string, std::string>> &AliasMap;
+  FunctionDecl *CurrentFunction;
 };
 
 class XPrefixAction : public ASTFrontendAction {
@@ -288,6 +490,54 @@ public:
     // Transform string literals
     StringLiteralTransformer SLT(SM, Repls);
     SLT.TraverseDecl(Ctx.getTranslationUnitDecl());
+
+    // Track external symbols and create aliases
+    ExternalSymbolTracker ExtTracker(SM);
+    ExtTracker.TraverseDecl(Ctx.getTranslationUnitDecl());
+
+    // Build alias map for all functions
+    std::map<const FunctionDecl*, std::map<std::string, std::string>> FunctionAliasMap;
+
+    // For each function, insert alias declarations
+    for (auto &Entry : ExtTracker.FunctionExternals) {
+      const FunctionDecl *FD = Entry.first;
+      const auto &Externals = Entry.second;
+
+      if (Externals.empty()) continue;
+
+      // Get the start of the function body
+      const CompoundStmt *Body = dyn_cast_or_null<CompoundStmt>(FD->getBody());
+      if (!Body) continue;
+
+      SourceLocation BodyStart = Body->getLBracLoc().getLocWithOffset(1);
+
+      // Build the alias declarations
+      std::string AliasDecls = "\n";
+      std::map<std::string, std::string> &AliasMap = FunctionAliasMap[FD];
+
+      for (const auto &ExtName : Externals) {
+        // Extract the unqualified name for aliasing
+        size_t LastColon = ExtName.rfind("::");
+        std::string UnqualifiedName = (LastColon != std::string::npos)
+            ? ExtName.substr(LastColon + 2)
+            : ExtName;
+
+        std::string AliasName = toUpsideDown(UnqualifiedName);
+        AliasMap[ExtName] = AliasName;
+
+        AliasDecls += "    auto &" + AliasName + " = " + ExtName + ";\n";
+      }
+
+      // Insert the alias declarations at the start of the function
+      auto Err = Repls.add(Replacement(SM, BodyStart, 0, AliasDecls));
+      if (Err) {
+        llvm::consumeError(std::move(Err));
+      }
+    }
+
+    // Replace uses of external symbols with aliases
+    ExternalSymbolReplacer ExtReplacer(SM, Repls, FunctionAliasMap);
+    ExtReplacer.TraverseDecl(Ctx.getTranslationUnitDecl());
 
     llvm::errs() << "Total replacements: " << Repls.size() << "\n";
 
