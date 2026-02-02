@@ -93,12 +93,12 @@ static std::string escapeString(const std::string &str) {
 }
 
 // Convert a string to upside-down using the map
-static std::string toUpsideDown(const std::string &str) {
+static std::string toUpsideDown(const std::string &str, bool ignoreUnderscore = true) {
   std::vector<std::string> chars;
   // Convert each character and store in vector
   for (char c : str) {
     auto it = upsideDownMap.find(c);
-    if (it != upsideDownMap.end()) {
+    if (it != upsideDownMap.end() and !(ignoreUnderscore && c == '_')) {
       chars.push_back(it->second);
     } else {
       // Keep character as-is if no mapping exists
@@ -264,7 +264,7 @@ public:
     std::string Interpreted = SL->getString().str();
 
     // Transform it
-    std::string Transformed = toUpsideDown(Interpreted);
+    std::string Transformed = toUpsideDown(Interpreted, false);
 
     // Escape it for writing back to source
     std::string Escaped = escapeString(Transformed);
