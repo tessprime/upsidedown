@@ -12,13 +12,68 @@
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Index/USRGeneration.h"
 #include "llvm/Support/CommandLine.h"
+#include <algorithm>
 #include <map>
+#include <vector>
 
 using namespace clang;
 using namespace clang::ast_matchers;
 using namespace clang::tooling;
 
 static llvm::cl::OptionCategory Cat("xprefix-renamer");
+
+// Map of ASCII characters to upside-down Unicode equivalents
+static const std::map<char, std::string> upsideDownMap = {
+  // Lowercase letters
+  {'a', "ɐ"}, {'b', "q"}, {'c', "ɔ"}, {'d', "p"}, {'e', "ǝ"},
+  {'f', "ɟ"}, {'g', "ƃ"}, {'h', "ɥ"}, {'i', "ᴉ"}, {'j', "ɾ"},
+  {'k', "ʞ"}, {'l', "l"}, {'m', "ɯ"}, {'n', "u"}, {'o', "o"},
+  {'p', "d"}, {'q', "b"}, {'r', "ɹ"}, {'s', "s"}, {'t', "ʇ"},
+  {'u', "n"}, {'v', "ʌ"}, {'w', "ʍ"}, {'x', "x"}, {'y', "ʎ"},
+  {'z', "z"},
+
+  // Uppercase letters
+  {'A', "∀"}, {'B', "ᙠ"}, {'C', "Ɔ"}, {'D', "ᗡ"}, {'E', "Ǝ"},
+  {'F', "Ⅎ"}, {'G', "⅁"}, {'H', "H"}, {'I', "I"}, {'J', "ſ"},
+  {'K', "⋊"}, {'L', "˥"}, {'M', "W"}, {'N', "N"}, {'O', "O"},
+  {'P', "Ԁ"}, {'Q', "Ό"}, {'R', "ᴚ"}, {'S', "S"}, {'T', "⊥"},
+  {'U', "∩"}, {'V', "Λ"}, {'W', "M"}, {'X', "X"}, {'Y', "⅄"},
+  {'Z', "Z"},
+
+  // Numbers
+  {'0', "0"}, {'1', "Ɩ"}, {'2', "ᄅ"}, {'3', "Ɛ"}, {'4', "ㄣ"},
+  {'5', "ϛ"}, {'6', "9"}, {'7', "ㄥ"}, {'8', "8"}, {'9', "6"},
+
+  // Common punctuation
+  {'_', "‾"}, {'.', "˙"}, {',', "'"}, {'!', "¡"}, {'?', "¿"},
+  {'\'', ","}, {'"', "„"}, {';', "؛"}, {'(', ")"}, {')', "("},
+  {'[', "]"}, {']', "["}, {'{', "}"}, {'}', "{"}, {'<', ">"},
+  {'>', "<"}, {'&', "⅋"}
+};
+
+// Convert a string to upside-down using the map
+static std::string toUpsideDown(const std::string &str) {
+  std::vector<std::string> chars;
+  // Convert each character and store in vector
+  for (char c : str) {
+    auto it = upsideDownMap.find(c);
+    if (it != upsideDownMap.end()) {
+      chars.push_back(it->second);
+    } else {
+      // Keep character as-is if no mapping exists
+      chars.push_back(std::string(1, c));
+    }
+  }
+  // Reverse the vector of characters (not bytes!)
+  std::reverse(chars.begin(), chars.end());
+
+  // Concatenate into final string
+  std::string result;
+  for (const auto &ch : chars) {
+    result += ch;
+  }
+  return result;
+}
 
 static bool isUserLocation(const SourceManager &SM, SourceLocation Loc) {
   if (Loc.isInvalid()) return false;
@@ -185,10 +240,7 @@ public:
     for (auto &It : ByUSR) {
       const NamedDecl *D = It.second;
       std::string Old = D->getNameAsString();
-      std::string New = "x_" + Old;
-
-      // Avoid double-prefixing if already renamed
-      if (Old.rfind("x_", 0) == 0) continue;
+      std::string New = toUpsideDown(Old);
 
       llvm::errs() << "Processing: " << Old << " -> " << New << "\n";
 
