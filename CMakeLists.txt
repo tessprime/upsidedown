@@ -23,7 +23,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
-add_executable(upsidedown main.cpp)
+add_executable(upsidedown src/main.cpp)
 
 # Add linker flags to avoid duplicate symbol errors
 if(UNIX AND NOT APPLE)
