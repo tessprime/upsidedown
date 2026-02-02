@@ -11,9 +11,11 @@ void myFunction() {
     int localVar = myVariable;
     MyStruct s;
     s.myField = localVar;
+    std::cout << "Hello World!" << std::endl;
 }
 
 int main() {
     myFunction();
+    std::cout << "Testing 123" << std::endl;
     return 0;
 }

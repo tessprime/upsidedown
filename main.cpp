@@ -203,6 +203,42 @@ private:
   unsigned OldNameLength;
 };
 
+// Visitor to transform string literals
+class StringLiteralTransformer : public RecursiveASTVisitor<StringLiteralTransformer> {
+public:
+  StringLiteralTransformer(const SourceManager &SM, Replacements &Repls)
+      : SM(SM), Repls(Repls) {}
+
+  bool VisitStringLiteral(StringLiteral *SL) {
+    if (!SL) return true;
+
+    SourceLocation Loc = SL->getBeginLoc();
+    if (Loc.isInvalid()) return true;
+    Loc = SM.getExpansionLoc(Loc);
+
+    // Only transform string literals in main file
+    if (!SM.isWrittenInMainFile(Loc)) return true;
+
+    std::string Original = SL->getString().str();
+    std::string Transformed = toUpsideDown(Original);
+
+    // Replace the content between the quotes
+    // getBeginLoc() points to the opening quote, so offset by 1 to skip it
+    SourceLocation StartLoc = Loc.getLocWithOffset(1);
+
+    auto Err = Repls.add(Replacement(SM, StartLoc, Original.length(), Transformed));
+    if (Err) {
+      llvm::consumeError(std::move(Err));
+    }
+
+    return true;
+  }
+
+private:
+  const SourceManager &SM;
+  Replacements &Repls;
+};
+
 class XPrefixAction : public ASTFrontendAction {
 public:
   bool BeginSourceFileAction(CompilerInstance &CI) override {
@@ -248,6 +284,10 @@ public:
       ReferenceFinder Finder(D, SM, Repls, New, Old);
       Finder.TraverseDecl(Ctx.getTranslationUnitDecl());
     }
+
+    // Transform string literals
+    StringLiteralTransformer SLT(SM, Repls);
+    SLT.TraverseDecl(Ctx.getTranslationUnitDecl());
 
     llvm::errs() << "Total replacements: " << Repls.size() << "\n";
 
