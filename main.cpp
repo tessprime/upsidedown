@@ -26,6 +26,9 @@ using namespace clang::tooling;
 
 static llvm::cl::OptionCategory Cat("xprefix-renamer");
 
+// Verbose flag (initialized in main after ResetCommandLineParser)
+static bool Verbose = false;
+
 // Map of ASCII characters to upside-down Unicode equivalents
 static const std::map<char, std::string> upsideDownMap = {
   // Lowercase letters
@@ -480,7 +483,9 @@ public:
       std::string Old = D->getNameAsString();
       std::string New = toUpsideDown(Old);
 
-      llvm::errs() << "Processing: " << Old << " -> " << New << "\n";
+      if (Verbose) {
+        llvm::errs() << "Processing: " << Old << " -> " << New << "\n";
+      }
 
       // Find all references to this declaration and create replacements
       ReferenceFinder Finder(D, SM, Repls, New, Old);
@@ -539,7 +544,9 @@ public:
     ExternalSymbolReplacer ExtReplacer(SM, Repls, FunctionAliasMap);
     ExtReplacer.TraverseDecl(Ctx.getTranslationUnitDecl());
 
-    llvm::errs() << "Total replacements: " << Repls.size() << "\n";
+    if (Verbose) {
+      llvm::errs() << "Total replacements: " << Repls.size() << "\n";
+    }
 
     // Apply replacements to files.
     Rewriter RW(SM, Ctx.getLangOpts());
@@ -572,12 +579,20 @@ int main(int argc, const char **argv) {
   // Reset command line parser to avoid "registered more than once" errors
   llvm::cl::ResetCommandLineParser();
 
+  // Define verbose flag after reset
+  llvm::cl::opt<bool> VerboseOpt("v", llvm::cl::desc("Enable verbose output"),
+                                  llvm::cl::cat(Cat));
+
   auto ExpectedParser = CommonOptionsParser::create(argc, argv, Cat);
   if (!ExpectedParser) {
     llvm::errs() << ExpectedParser.takeError();
     return 1;
   }
   CommonOptionsParser &OptionsParser = ExpectedParser.get();
+
+  // Set the global verbose flag
+  Verbose = VerboseOpt;
+
   ClangTool Tool(OptionsParser.getCompilations(),
                  OptionsParser.getSourcePathList());
 

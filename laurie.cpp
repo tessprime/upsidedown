@@ -7,7 +7,7 @@ int main() {
 
     std::cout << believe_it_or_not << "\n";
     std::cout << this_is_valid_cpp << "\n";
-    cout << hello_world << "\n";
+    std::cout << hello_world << "\n";
 
     return 0;
 }
