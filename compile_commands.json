@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/home/froeb/projects/invert_cpp",
+    "command": "/usr/bin/c++ -std=c++17 -c test.cpp -o test.o",
+    "file": "test.cpp"
+  }
+]

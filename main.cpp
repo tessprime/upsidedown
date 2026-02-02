@@ -1,14 +1,18 @@
 // xprefix_rename.cpp
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "clang/Tooling/Refactoring.h"
 #include "clang/Tooling/Core/Replacement.h"
 #include "clang/Rewrite/Core/Rewriter.h"
+#include "clang/Index/USRGeneration.h"
 #include "llvm/Support/CommandLine.h"
+#include <map>
 
 using namespace clang;
 using namespace clang::ast_matchers;
@@ -68,6 +72,82 @@ private:
   std::vector<const NamedDecl*> &Out;
 };
 
+// Helper to find all references to a declaration
+class ReferenceFinder : public RecursiveASTVisitor<ReferenceFinder> {
+public:
+  ReferenceFinder(const NamedDecl *Target, const SourceManager &SM,
+                  Replacements &Repls, const std::string &NewName,
+                  const std::string &OldName)
+      : Target(Target->getCanonicalDecl()), SM(SM), Repls(Repls),
+        NewName(NewName), OldNameLength(OldName.length()) {}
+
+  bool VisitDeclRefExpr(DeclRefExpr *E) {
+    const ValueDecl *D = E->getDecl();
+    if (!D) return true;
+    if (D->getCanonicalDecl() == Target) {
+      addReplacement(E->getLocation(), OldNameLength);
+    }
+    return true;
+  }
+
+  bool VisitMemberExpr(MemberExpr *E) {
+    const ValueDecl *D = E->getMemberDecl();
+    if (!D) return true;
+    if (D->getCanonicalDecl() == Target) {
+      addReplacement(E->getMemberLoc(), OldNameLength);
+    }
+    return true;
+  }
+
+  bool VisitTypeLoc(TypeLoc TL) {
+    if (auto ElabTL = TL.getAs<ElaboratedTypeLoc>()) {
+      TL = ElabTL.getNamedTypeLoc();
+    }
+
+    if (auto TagTL = TL.getAs<TagTypeLoc>()) {
+      const TagDecl *TD = TagTL.getDecl();
+      if (TD && TD->getCanonicalDecl() == Target) {
+        addReplacement(TagTL.getNameLoc(), OldNameLength);
+      }
+    } else if (auto TDT = TL.getAs<TypedefTypeLoc>()) {
+      const TypedefNameDecl *TD = TDT.getTypedefNameDecl();
+      if (TD && TD->getCanonicalDecl() == Target) {
+        addReplacement(TDT.getNameLoc(), OldNameLength);
+      }
+    }
+    return true;
+  }
+
+  bool VisitNamedDecl(NamedDecl *D) {
+    if (D->getCanonicalDecl() == Target) {
+      addReplacement(D->getLocation(), OldNameLength);
+    }
+    return true;
+  }
+
+private:
+  void addReplacement(SourceLocation Loc, unsigned Length) {
+    if (Loc.isInvalid()) return;
+    Loc = SM.getExpansionLoc(Loc);
+    if (Loc.isInvalid()) return;
+
+    // Only replace in main file
+    if (!SM.isWrittenInMainFile(Loc)) return;
+
+    auto Err = Repls.add(Replacement(SM, Loc, Length, NewName));
+    if (Err) {
+      // Silently consume duplicate errors
+      llvm::consumeError(std::move(Err));
+    }
+  }
+
+  const Decl *Target;
+  const SourceManager &SM;
+  Replacements &Repls;
+  std::string NewName;
+  unsigned OldNameLength;
+};
+
 class XPrefixAction : public ASTFrontendAction {
 public:
   bool BeginSourceFileAction(CompilerInstance &CI) override {
@@ -90,18 +170,18 @@ public:
   void EndSourceFileAction() override {
     auto &CI = getCompilerInstance();
     ASTContext &Ctx = CI.getASTContext();
+    auto &SM = Ctx.getSourceManager();
 
     // Deduplicate by USR (stable symbol id).
-    llvm::DenseMap<std::string, const NamedDecl*> ByUSR;
+    std::map<std::string, const NamedDecl*> ByUSR;
 
     for (const NamedDecl *D : Decls) {
-      std::string USR;
+      llvm::SmallString<128> USR;
       if (index::generateUSRForDecl(D, USR)) continue;
-      ByUSR[USR] = D;
+      ByUSR[std::string(USR)] = D;
     }
 
-    // Build replacements via rename refactoring.
-    // NOTE: API may differ by LLVM version; adjust as needed.
+    // Build replacements by finding all references
     for (auto &It : ByUSR) {
       const NamedDecl *D = It.second;
       std::string Old = D->getNameAsString();
@@ -110,35 +190,32 @@ public:
       // Avoid double-prefixing if already renamed
       if (Old.rfind("x_", 0) == 0) continue;
 
-      // Compute replacements for this symbol
-      // This is the part that can vary most by LLVM version.
-      auto Rename = createRenameOccurrences(
-          Ctx, *D, New, /*PrevName=*/Old);
+      llvm::errs() << "Processing: " << Old << " -> " << New << "\n";
 
-      if (!Rename) continue;
-
-      for (const auto &R : *Rename) {
-        llvm::Error Err = Repls.add(R);
-        (void)Err; // ignore/collect errors as desired
-      }
+      // Find all references to this declaration and create replacements
+      ReferenceFinder Finder(D, SM, Repls, New, Old);
+      Finder.TraverseDecl(Ctx.getTranslationUnitDecl());
     }
 
-    // Apply replacements to files.
-    // In real tools you’ll want to write to disk or to stdout.
-    LangOptions DefaultLang;
-    IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts(new DiagnosticOptions());
-    DiagnosticsEngine Diags(
-        IntrusiveRefCntPtr<DiagnosticIDs>(new DiagnosticIDs()),
-        &*DiagOpts);
+    llvm::errs() << "Total replacements: " << Repls.size() << "\n";
 
-    auto &SM = Ctx.getSourceManager();
+    // Apply replacements to files.
     Rewriter RW(SM, Ctx.getLangOpts());
 
-    bool Failed = applyAllReplacements(Repls, RW);
-    if (Failed) return;
+    // applyAllReplacements returns true on success in LLVM-16
+    if (!tooling::applyAllReplacements(Repls, RW)) {
+      llvm::errs() << "Failed to apply replacements\n";
+      return;
+    }
 
     // Write modified buffers back to stdout
-    RW.getEditBuffer(SM.getMainFileID()).write(llvm::outs());
+    const RewriteBuffer *RB = RW.getRewriteBufferFor(SM.getMainFileID());
+    if (RB) {
+      RB->write(llvm::outs());
+    } else {
+      // No changes, write original
+      llvm::outs() << SM.getBufferData(SM.getMainFileID());
+    }
   }
 
 private:
@@ -150,6 +227,9 @@ private:
 } // namespace
 
 int main(int argc, const char **argv) {
+  // Reset command line parser to avoid "registered more than once" errors
+  llvm::cl::ResetCommandLineParser();
+
   auto ExpectedParser = CommonOptionsParser::create(argc, argv, Cat);
   if (!ExpectedParser) {
     llvm::errs() << ExpectedParser.takeError();

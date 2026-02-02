@@ -25,6 +25,11 @@ add_definitions(${LLVM_DEFINITIONS})
 
 add_executable(xprefix_renamer main.cpp)
 
+# Add linker flags to avoid duplicate symbol errors
+if(UNIX AND NOT APPLE)
+  target_link_options(xprefix_renamer PRIVATE "-Wl,--allow-multiple-definition")
+endif()
+
 llvm_map_components_to_libnames(LLVM_LIBS support)
 target_link_libraries(xprefix_renamer
   PRIVATE
