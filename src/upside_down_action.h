@@ -55,7 +55,7 @@ public:
       std::string Old = D->getNameAsString();
       std::string New = toUpsideDown(Old);
 
-      if (Verbose) {
+      if (Debug) {
         llvm::errs() << "Processing: " << Old << " -> " << New << "\n";
       }
 
@@ -106,7 +106,7 @@ public:
     ExternalSymbolReplacer ExtReplacer(SM, Repls, FunctionAliasMap);
     ExtReplacer.TraverseDecl(Ctx.getTranslationUnitDecl());
 
-    if (Verbose) {
+    if (Debug) {
       llvm::errs() << "Total replacements: " << Repls.size() << "\n";
     }
 

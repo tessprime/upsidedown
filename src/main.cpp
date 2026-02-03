@@ -12,15 +12,15 @@ using namespace clang::tooling;
 
 static llvm::cl::OptionCategory Cat("upsidedown options");
 
-// Define the global verbose flag (declared in upsidedown_utils.h)
-bool Verbose = false;
+// Define the global Debug flag (declared in upsidedown_utils.h)
+bool Debug = false;
 
 int main(int argc, const char **argv) {
   // Reset command line parser to avoid "registered more than once" errors
   llvm::cl::ResetCommandLineParser();
 
-  // Define verbose flag after reset
-  llvm::cl::opt<bool> VerboseOpt("v", llvm::cl::desc("Enable verbose output"),
+  // Define debug flag after reset
+  llvm::cl::opt<bool> DebugOpt("d", llvm::cl::desc("Enable debug output"),
                                   llvm::cl::cat(Cat));
 
   auto ExpectedParser = CommonOptionsParser::create(argc, argv, Cat);
@@ -30,8 +30,8 @@ int main(int argc, const char **argv) {
   }
   CommonOptionsParser &OptionsParser = ExpectedParser.get();
 
-  // Set the global verbose flag
-  Verbose = VerboseOpt;
+  // Set the global debug flag
+  Debug = DebugOpt;
 
   ClangTool Tool(OptionsParser.getCompilations(),
                  OptionsParser.getSourcePathList());

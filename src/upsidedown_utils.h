@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-// Global verbose flag (defined in one translation unit)
-extern bool Verbose;
+// Global debug flag (defined in one translation unit)
+extern bool Debug;
 
 // Map of ASCII characters to upside-down Unicode equivalents
 static const std::map<char, std::string> upsideDownMap = {
